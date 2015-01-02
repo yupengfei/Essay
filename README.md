@@ -26,7 +26,7 @@
 
 [帝国黄昏](EmpireAtDusk)
 
-###
+###插曲
 
 [小公主日记](PrincessNote)
 
