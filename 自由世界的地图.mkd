@@ -291,20 +291,28 @@ Python简单易用，非常适合带来你的初吻，啊，不，跟计算机�
 
 * [《a byte of python3》](http://www.swaroopch.com/notes/python/)，它是一本很简单的入门书
 * [官方入门书](https://docs.python.org/3/tutorial/index.html)，有些写的比上一本更清晰
-* [《learning python》](http://book.douban.com/subject/3988517/)，非常厚，讲了两个版本的python的方方面面。
+* [《Learning Python》](http://book.douban.com/subject/3988517/)，非常厚，讲了两个版本的python的方方面面。
 
 我们不推荐的书：
 
 * [《Head first python》](http://book.douban.com/subject/5310233/)，感觉写的有些松散，跨度太大，不太适合新手。
 
+##从上到下依次看，数据结构
+在有了基本的语法之后，我们仍然需要一种方式把基本的语法组织在一起解决实际问题，这时候就需要数据结构了。原则上，数据结构与初级的算法是同一门课，因此单独拆出来。数据结构与语言相关。
+
+我们推荐的书：
+
+* [《算法导论》](http://book.douban.com/subject/1885170/)，非常厚，但是很值得花时间看完，虽然很多计算语言自带一套标准库实现了很多算法，但是对算法的掌握依然很重要。这本书用的伪代码描述。
+* [《数据结构与算法分析：C语言描述》](http://book.douban.com/subject/4924153/),主要涉及C语言的基本的数据结构和算法。
+* [《数据结构与算法分析：C++描述》](http://book.douban.com/subject/1971825/)，这本书大量使用了标准库，可以看一下，但是标准库需要参考其它的书。
+
 ##从上到下依次看，算法
-在有了基本的语法之后，我们仍然需要一种方式把基本的语法组织在一起解决实际问题，这时候你就需要算法了。
+，这时候你就需要算法了。
 
 我们推荐的书：
 
 * [《编程之美》](http://book.douban.com/subject/3004255/)，标题过于夸张，实际上主要讲了一些很有意思的算法
 * [《数学之美》](http://book.douban.com/subject/10750155/)，没有标题的那么夸张，但是不妨花一个下午看一下。
-* [《算法导论》](http://book.douban.com/subject/1885170/)，非常厚，但是很值得花时间看完，虽然很多计算语言自带一套标准库实现了很多算法，但是对算法的掌握依然很重要。
 
 我们不推荐的书：
 
@@ -323,10 +331,15 @@ Python简单易用，非常适合带来你的初吻，啊，不，跟计算机�
 我们推荐的书：
 
 * [官方手册](http://www.cplusplus.com/doc/tutorial/)，它是目前能找到的最合适的入门书
-* [《C++ primer》](http://book.douban.com/subject/25708312/)，这本书讲了C++的基础知识，非常厚，但是条理比较清楚。
+* [《C++ primer》](http://book.douban.com/subject/25708312/)，这本书讲了C++的基础知识，非常厚，但是条理比较清楚。 C++11变化很大，不再推荐该书的上一版本，诸如右值、匿名函数等特性这本书将的并不好。
 * [《Effective C++》](http://book.douban.com/subject/5387403/)，讲解了C++的一些用法和注意事项，部分因为C++11的标准库而过时。
 * [《More effective C++》](http://book.douban.com/subject/5908727/)，讲了一些更高端的用法，部分因为C++11而过时。
 * [《深度探索C++对象模型》](http://book.douban.com/subject/10427315/)，对C++的继承、多态等实现机制进行了讲解，非常有启发性。
+* [《C++标准库》](http://book.douban.com/subject/20472462/)，C++11将很多第三方的库（boost）加入了标准库，有些特性文档很少，该书有详细额度介绍。
+
+我们不推荐的书：
+
+* [《The c++ programming language》](http://book.douban.com/subject/1452107/)，作为一本C++的书，很明显它太薄了，初学者很难看的懂。
 
 ##从上到下依次看，Java
 Java是一门用途广泛的语言,当然本次我们只针对java语言来说，没有针对web跟安卓来讲。
@@ -342,12 +355,14 @@ Java是一门用途广泛的语言,当然本次我们只针对java语言来说�
 ##从上到下依次看，Golang
 Golang是google推出的服务器编程语言，对多线程支持非常好。
 
-我们推荐的书（其实写的都不是特别好，只是目前可以找到的书非常少）：
+我们推荐的书：
 
-* [《Go语言程序设计》](http://book.douban.com/subject/24869910/)，较为细致的讲了Golang的基本语法。
 * [《Go web编程》](http://book.douban.com/subject/24316255/)，前半部分是基本语法，后半部分是web开发，部分关于标准库的内容过时了。
+* [《Go并发编程实战》](http://book.douban.com/subject/26244729/)，覆盖了基本的语法和并发需要的基本知识。
 
 我们不推荐的书：
+
+* [《Go语言程序设计》](http://book.douban.com/subject/24869910/)，较为细致的讲了Golang的基本语法，但是结构很混乱，初学者可能看不懂。
 
 ##从上到下依次看，JavaScript
 
@@ -403,8 +418,29 @@ git是一个强大的分布式版本管理工具，功能强大。
 我们推荐的书：
 
 * [《深入理解计算机系统](http://book.douban.com/subject/5333562/)，以程序员的视角讲解的计算机系统的方方面面。
-* [《计算机组成与设计 硬件/软件接口](http://book.douban.com/subject/10441748/)，MIPS构架。
+* [《计算机组成与设计 硬件/软件接口》](http://book.douban.com/subject/10441748/)，MIPS构架。
 
+##从上到下依次看，OpenGL&WebGL
+
+开发手机游戏或者Linux及Mac下面的游戏，OpenGL都是一个绕不开的话题，但是OpenGL相关的书要么严重过时，还停留在固定流水线时代，要么写的根本看不懂。WebGL伴随Html5火了起来，靠谱的书依然很少。
+
+我们推荐的书：
+
+* [《WebGL编程指南》](http://book.douban.com/subject/25909351/)，对GPU内部原理进行了简单的介绍，对shader执行流程有较为细致的讲解，是为数不多的对该领域介绍比较详细的书之一。
+
+* [《图形着色器》](http://book.douban.com/subject/23858154/)，这一本书大量的设计shader的编写，但是对新手很不友好，而且翻译的不好。
+
+我们不推荐的书：
+
+* [《OpenGL编程指南》](http://book.douban.com/subject/4311129/)，这本书大部分内容过时了（OpenGL 3.0之后就不再是固定流水线了），具体的执行流程讲的也不清楚。
+
+* [《OpenGL超级宝典》](http://book.douban.com/subject/5273949/)，这本书大部分内容过时了（OpenGL 3.0之后就不再是固定流水线了），具体的执行流程讲的也不清楚。
+
+* [《Web入门指南》](http://book.douban.com/subject/24750332/)，大量的使用three.js，偏向WebGL的应用，但是讲的并不清楚。
+
+##从上到下依次看，OpenCL&CUDA
+
+OpenCL作为一个异构计算的方案，应用非常广泛，比如OpenCV提供了很多算法实现，CUDA作为Nvdia力推的GPU计算框架，应用的更为广泛，很多GPU算法都是基于CUDA的，因为它具有更高的效率。
 
 ##从上到下依次看，编译原理
 
