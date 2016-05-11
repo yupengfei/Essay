@@ -4,7 +4,9 @@ JavaScript的类型包括
 
 1. undefined 未申明，或者变量的值即为undefined或者未初始化
 
+	```javascript
 	typeof a
+	```
 
 1. boolean 布尔类型
 
