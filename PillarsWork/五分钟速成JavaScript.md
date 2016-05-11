@@ -86,7 +86,9 @@ Android调用
 	```javascript
 	androidAntLinker.GetAppVersion(JSON.stringify(request));
 	```
-	
+
+Android
+
 	```java
 	@JavascriptInterface
         public void GetAppVersion(String request) {
