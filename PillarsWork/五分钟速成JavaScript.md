@@ -90,10 +90,6 @@ Android调用
 	@JavascriptInterface
         public void GetAppVersion(String request) {
             Log.e("GetAppVersion", request);
-
-            //webView.evaluateJavascript("antlinker.getAppVersion.success(new Object({Version: '" + Version + "'}))", null);
-//            webView.loadUrl("javascript:document.querySelector('body').style.color = 'red';void(0);");
-//            webView.loadUrl("javascript:antlinker.getAppVersion.success(new Object({Version: '\" + Version + \"'}))");
             webView.post(new Runnable() {
                 @Override
                 public void run() {
