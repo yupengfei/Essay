@@ -1,4 +1,4 @@
-#五分钟速成JavaScript
+#半小时速成JavaScript
 
 JavaScript是一门动态类型的语言，JavaScript的类型包括
 
@@ -99,5 +99,62 @@ JavaScript是一门动态类型的语言，JavaScript的类型包括
             });
         }
     ```
+
+1. iOS调用
+
+	```javascript
+	webkit.messageHandlers.getAppVersion.postMessage(JSON.stringify(request));
+	```
+
+	```swift
+	self.webView!.evaluateJavaScript("antlinker.getAppVersion.success(new Object({Version: '" + Version + "'}))", completionHandler: nil);
+	```
+
+1. 最简单的网页
+
+	```html
+	<!DOCTYPE html>
+		<html lang="en">
+		<head>
+		    <meta charset="UTF-8">
+		    <title>最简单的网页</title>
+		    <script>
+			    var a = function() {
+			    	console.log("test");
+			    };
+			    a();
+			</script>
+		</head>
+		<body>
+		</body>
+	</html>
+	```
+
+1. 加强版
+
+	```html
+	<!DOCTYPE html>
+		<html lang="en">
+		<head>
+		    <meta charset="UTF-8">
+		    <title>最简单的网页</title>
+		    <script src="demo.js"></script>
+		    <script>
+		    	a();
+			</script>
+		</head>
+		<body>
+		</body>
+	</html>
+	```
+
+	```javascript
+	// demo.js
+	var a = function() {
+		alert("test");
+	};
+	```
+
+
 
 
