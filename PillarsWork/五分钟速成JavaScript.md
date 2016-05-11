@@ -78,16 +78,13 @@ JavaScript是一门动态类型的语言，JavaScript的类型包括
 	}
 
 	b(a)
-
 	```
 
-Android调用
+1. Android调用
 
 	```javascript
 	androidAntLinker.GetAppVersion(JSON.stringify(request));
 	```
-
-Android
 
 	```java
 	@JavascriptInterface
