@@ -4,7 +4,7 @@
 
 在阿里云上购买三个节点
 
-	```shell
+	```zsh
 
 	apt update
 	```
