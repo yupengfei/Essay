@@ -88,16 +88,16 @@ JavaScript是一门动态类型的语言，JavaScript的类型包括
 
 	```java
 	@JavascriptInterface
-        public void GetAppVersion(String request) {
-            Log.e("GetAppVersion", request);
-            webView.post(new Runnable() {
-                @Override
-                public void run() {
-                    String Version = "1.2.3";
-                    webView.evaluateJavascript("antlinker.getAppVersion.success(new Object({Version: '" + Version + "'}))", null);
-                }
-            });
-        }
+    public void GetAppVersion(String request) {
+        Log.e("GetAppVersion", request);
+        webView.post(new Runnable() {
+            @Override
+            public void run() {
+                String Version = "1.2.3";
+                webView.evaluateJavascript("antlinker.getAppVersion.success(new Object({Version: '" + Version + "'}))", null);
+            }
+        });
+    }
     ```
 
 1. iOS调用
