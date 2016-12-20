@@ -22,7 +22,7 @@ nginx的配置文件由指令组成，有些指令可以使用括号包含其它
 假设我们的html文件在/data/www文件夹内，图片在/data/images文件夹内。
 
 	location / {
-		root /data/www
+		root /data/www;
 	}
 
 这时，所有/开头的请求会被添加上root指令指定的地址，即/data/www，组成最终的地址/data/www/。
@@ -32,7 +32,7 @@ nginx的配置文件由指令组成，有些指令可以使用括号包含其它
 对于图片，增加另一个location。
 
 	location /images/ {
-		root /data
+		root /data;
 	}
 
 这样，所有以/images开头的请求都被映射到/data/images/。
@@ -60,7 +60,7 @@ nginx的配置文件由指令组成，有些指令可以使用括号包含其它
 		}
 
 		location /images/ {
-			root /data
+			root /data;
 		}
 	}
 
