@@ -1,4 +1,4 @@
-#Nginx速成
+#Nginx配置速成
 
 ## 安装nginx
 
