@@ -841,4 +841,426 @@ int stream_component_open(VideoState *is, int stream_index) {
   }
 }
 ```
-这与我们之前的
+这与我们之前写的差不多，除了我们对音频和视频的处理进行了泛化。注意不再使用aCodecCtx，而是初始化我们的大结构体以便后续提供给音频的callback。我们将流保存为audio_st和video_st。我们也增加了视频队列并将其与初始化音频队列同样的方法初始化。我们也将视频的队列添加到结构体，然后像初始化音频队列那样初始化它。这里的要点是启动视频和音频线程。对应的部分如下：
+```c
+    SDL_PauseAudio(0);
+    break;
+
+/* ...... */
+
+    is->video_tid = SDL_CreateThread(video_thread, is);
+```
+这里的SDL_CreateThread()跟之前的SDL_PauseAudio()用法一样。我们回到video_thread()函数。
+
+在此之前，我们回顾一下decode_thread()的后半部分。它基本上就是一个for循环，读入packet然后把packet放到正确的队列里。
+```c
+  for(;;) {
+    if(is->quit) {
+      break;
+    }
+    // seek stuff goes here
+    if(is->audioq.size > MAX_AUDIOQ_SIZE ||
+       is->videoq.size > MAX_VIDEOQ_SIZE) {
+      SDL_Delay(10);
+      continue;
+    }
+    if(av_read_frame(is->pFormatCtx, packet) < 0) {
+      if((is->pFormatCtx->pb->error) == 0) {
+	      SDL_Delay(100); /* no error; wait for user input */
+	      continue;
+      } else {
+	      break;
+      }
+    }
+    // Is this a packet from the video stream?
+    if(packet->stream_index == is->videoStream) {
+      packet_queue_put(&is->videoq, packet);
+    } else if(packet->stream_index == is->audioStream) {
+      packet_queue_put(&is->audioq, packet);
+    } else {
+      av_free_packet(packet);
+    }
+  }
+```
+这里没有新东西，除了我们设定了音频和视频队列的最大长度，并增加了读的时候的错误检查。格式的上下文包含一个名为pb的ByteIOContext结构体。ByteIOContext是一个保存所有底层的文件信息的结构体。
+
+
+在for循环结束后，接下来的是等待程序退出或者通知我们它退出了的代码。代码很直观，它展示了如何插入事件，正如我们后续展示视频时的插入事件。
+```c
+  while(!is->quit) {
+    SDL_Delay(100);
+  }
+
+ fail:
+  if(1){
+    SDL_Event event;
+    event.type = FF_QUIT_EVENT;
+    event.user.data1 = is;
+    SDL_PushEvent(&event);
+  }
+  return 0;
+```
+
+
+我们通过使用SDL的常数SDL_USEREVENT来获取用户事件。第一个用户事件应该被赋予SDL_USEREVENT值，下一个是SDL_USEREVENT + 1，以此类推。在我们的程序里，将FF_QUIT_EVENT定义为SDL_USEREVENT + 1。我们还可以传入user data，此处我们传入大结构体。最终我们调用SDL_PushEvent()。在我们的事件循环中，之前我们是将SDL_QUIT_EVENT传入。后续我们会更详细的看一下这个事件循环，现在我们只需要知道放入FF_QUIT_EVENT，后续我们会捕获它并且修改quit标识。
+
+### 获取帧：video_thread
+
+在我们的编解码器准备好之后，我们启动视频线程。这个线程从视频队列中读入packet，解码视频到帧，然后调用queue_picture函数将处理后的帧放入图片队列：
+```c
+int video_thread(void *arg) {
+  VideoState *is = (VideoState *)arg;
+  AVPacket pkt1, *packet = &pkt1;
+  int frameFinished;
+  AVFrame *pFrame;
+
+  pFrame = av_frame_alloc();
+
+  for(;;) {
+    if(packet_queue_get(&is->videoq, packet, 1) < 0) {
+      // means we quit getting packets
+      break;
+    }
+    // Decode video frame
+    avcodec_decode_video2(is->video_st->codec, pFrame, &frameFinished, packet);
+
+    // Did we get a video frame?
+    if(frameFinished) {
+      if(queue_picture(is, pFrame) < 0) {
+	break;
+      }
+    }
+    av_free_packet(packet);
+  }
+  av_free(pFrame);
+  return 0;
+}
+```
+这个函数里的多数代码看起来应该比较熟悉。我们将avcodec_decode_video2移动到这里，只是改了一些参数：例如，我们将AVStream存储到我们的大结构体，所以我们从那里获取编解码器。我们仅仅是不停的从视频队列中取出packet知道有人告诉我们要退出或者我们遇到了错误。
+
+### 帧队列
+
+我们来看一下存储解码后的帧的函数，pFrame是图片队列。因为我们的图片队列是一个SDL overlay（这样我们就可以让展示函数进行尽可能少的计算了），我们需要将帧转换成这种格式。我们存储图片队列的数据结构如下：
+```c
+typedef struct VideoPicture {
+  SDL_Overlay *bmp;
+  int width, height; /* source height & width */
+  int allocated;
+} VideoPicture;
+```
+我们的大结构体有一块缓存用于存储他们。然后我们需要手工分配SDL_Overlay的空间（注意allocated标识会展示我们是否已经完成分配）。
+
+为了使用这个队列，我们有两个指针，正在写入的index和正在读出的index。我们还要记录缓存里有多少图片。为了向队列中写入，我们首先要等到缓存区域清空以便有地方存储VideoPicture。接下来我们检查我们写入的index是否已经分配了overlay。如果没有的话，我们将分配空间。如果窗口的大小改变了的话，我们需要重新分配缓存。
+```c
+int queue_picture(VideoState *is, AVFrame *pFrame) {
+
+  VideoPicture *vp;
+  int dst_pix_fmt;
+  AVPicture pict;
+
+  /* wait until we have space for a new pic */
+  SDL_LockMutex(is->pictq_mutex);
+  while(is->pictq_size >= VIDEO_PICTURE_QUEUE_SIZE &&
+	!is->quit) {
+    SDL_CondWait(is->pictq_cond, is->pictq_mutex);
+  }
+  SDL_UnlockMutex(is->pictq_mutex);
+
+  if(is->quit)
+    return -1;
+
+  // windex is set to 0 initially
+  vp = &is->pictq[is->pictq_windex];
+
+  /* allocate or resize the buffer! */
+  if(!vp->bmp ||
+     vp->width != is->video_st->codec->width ||
+     vp->height != is->video_st->codec->height) {
+    SDL_Event event;
+
+    vp->allocated = 0;
+    alloc_picture(is);
+    if(is->quit) {
+      return -1;
+    }
+  }
+```
+其中alloc_picture()函数如下：
+```c
+void alloc_picture(void *userdata) {
+
+  VideoState *is = (VideoState *)userdata;
+  VideoPicture *vp;
+
+  vp = &is->pictq[is->pictq_windex];
+  if(vp->bmp) {
+    // we already have one make another, bigger/smaller
+    SDL_FreeYUVOverlay(vp->bmp);
+  }
+  // Allocate a place to put our YUV image on that screen
+  SDL_LockMutex(screen_mutex);
+  vp->bmp = SDL_CreateYUVOverlay(is->video_st->codec->width,
+				 is->video_st->codec->height,
+				 SDL_YV12_OVERLAY,
+				 screen);
+  SDL_UnlockMutex(screen_mutex);
+  vp->width = is->video_st->codec->width;
+  vp->height = is->video_st->codec->height;  
+  vp->allocated = 1;
+}
+```
+可以看到我们将主循环中的SDL_CreateYUVOverlay函数移动到了这里。需要注意的是，我们在这个函数周围有一个mutex锁，因为两个线程不能同时向屏幕写入信息。这将会避免alloc_picture忙于展示图片。我们在全局变量里创建了这个锁并且在main里面初始化了它。记住我们在VideoPicture结构体里保存了宽度和高度数据，因为基于某种原因，我们希望确保视频的尺寸不会改变。
+
+好了，我们都设置好了，而且我们有一个已经分配好内存的YUV，并且准备好了接收图片。然后我们回到queue_picture函数来看一下将帧拷贝到overlay的代码。其中部分代码我们已经见过：
+```c
+int queue_picture(VideoState *is, AVFrame *pFrame) {
+
+  /* Allocate a frame if we need it... */
+  /* ... */
+  /* We have a place to put our picture on the queue */
+
+  if(vp->bmp) {
+
+    SDL_LockYUVOverlay(vp->bmp);
+    
+    dst_pix_fmt = PIX_FMT_YUV420P;
+    /* point pict at the queue */
+
+    pict.data[0] = vp->bmp->pixels[0];
+    pict.data[1] = vp->bmp->pixels[2];
+    pict.data[2] = vp->bmp->pixels[1];
+    
+    pict.linesize[0] = vp->bmp->pitches[0];
+    pict.linesize[1] = vp->bmp->pitches[2];
+    pict.linesize[2] = vp->bmp->pitches[1];
+    
+    // Convert the image into YUV format that SDL uses
+    sws_scale(is->sws_ctx, (uint8_t const * const *)pFrame->data,
+	      pFrame->linesize, 0, is->video_st->codec->height,
+	      pict.data, pict.linesize);
+    
+    SDL_UnlockYUVOverlay(vp->bmp);
+    /* now we inform our display thread that we have a pic ready */
+    if(++is->pictq_windex == VIDEO_PICTURE_QUEUE_SIZE) {
+      is->pictq_windex = 0;
+    }
+    SDL_LockMutex(is->pictq_mutex);
+    is->pictq_size++;
+    SDL_UnlockMutex(is->pictq_mutex);
+  }
+  return 0;
+}
+```
+这部分的主体是我们之前用到的将帧塞到YUV overlay的代码。最后一部分是将我们的值放进队列。这个队列的工作模式是，一直往里面里塞直到它满了，同时只要里面有值就从其中读入。然而一切都依赖于is->pictq_size的值，所以我们需要锁上它。所以这里我们是做的是增加写入指针的值（在必要的时候转回到初始位置），然后锁住队列并增大它的大小。现在读者应该知道队列有更多的信息，以便在队列满了的时候，写入者知道。
+
+### 展示视频
+这是我们的视频的线程，我们将除它之外所有其它线程封装了，还记得之前说过的schedule_refresh()函数吗？它的代码如下：
+```c
+/* schedule a video refresh in 'delay' ms */
+static void schedule_refresh(VideoState *is, int delay) {
+  SDL_AddTimer(delay, sdl_refresh_timer_cb, is);
+}
+```
+SDL_AddTimer()是一个SDL函数，它在指定的毫秒之后调用传入的callback函数（还可以带有一些用户数据）。我们将使用这个函数去规划视频的更新，每次我们调用这个函数，它设置一个定时器，定时器会触发事件，事件接下来会让main函数调用一个函数去从我们的图片队列拉取一个帧并展示。
+
+但是首先，我们需要触发一个事件。它通过这种方式发给我们：
+```c
+static Uint32 sdl_refresh_timer_cb(Uint32 interval, void *opaque) {
+  SDL_Event event;
+  event.type = FF_REFRESH_EVENT;
+  event.user.data1 = opaque;
+  SDL_PushEvent(&event);
+  return 0; /* 0 means stop timer */
+}
+```
+这是一个我们熟悉的事件插入，此处的FF_REFRESH_EVENT被定义为SDL_USEREVENT + 1。我们需要注意的是，当我们return 0，SDL会停止定时器所有callback就不再会被调用了。
+
+我们插入一个FF_REFRESH_EVENT后，需要在事件循环中处理它：
+```c
+for(;;) {
+
+  SDL_WaitEvent(&event);
+  switch(event.type) {
+  /* ... */
+  case FF_REFRESH_EVENT:
+    video_refresh_timer(event.user.data1);
+    break;
+```
+上述代码调用了下述函数，它负责将数据从图片队列里面拿出来：
+```c
+void video_refresh_timer(void *userdata) {
+
+  VideoState *is = (VideoState *)userdata;
+  VideoPicture *vp;
+  
+  if(is->video_st) {
+    if(is->pictq_size == 0) {
+      schedule_refresh(is, 1);
+    } else {
+      vp = &is->pictq[is->pictq_rindex];
+      /* Timing code goes here */
+
+      schedule_refresh(is, 80);
+      
+      /* show the picture! */
+      video_display(is);
+      
+      /* update queue for next picture! */
+      if(++is->pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE) {
+	is->pictq_rindex = 0;
+      }
+      SDL_LockMutex(is->pictq_mutex);
+      is->pictq_size--;
+      SDL_CondSignal(is->pictq_cond);
+      SDL_UnlockMutex(is->pictq_mutex);
+    }
+  } else {
+    schedule_refresh(is, 100);
+  }
+}
+```
+到目前为止，函数很简单：在队列里有值的时候它将其取出，设置一个定时器来确定下一个帧被战士的时间，调用video_display来负责把视频展示到屏幕上，然后增加队列的计数器，减小队列的大小。我们需要注意在这里我们没有使用vp，后续在开始同步视频的时候，我们会使用它来获取时间信息。看到计时的代码了吗？在这里，我们需要指定下一个视频帧展示的时间，然后将它的值放入schedule_refresh()函数。目前我们设置为80，后面我们会优化它。
+
+我们基本上完成了，现在做最后一件事：展示视频！video_display函数的代码如下：
+```c
+void video_display(VideoState *is) {
+
+  SDL_Rect rect;
+  VideoPicture *vp;
+  float aspect_ratio;
+  int w, h, x, y;
+  int i;
+
+  vp = &is->pictq[is->pictq_rindex];
+  if(vp->bmp) {
+    if(is->video_st->codec->sample_aspect_ratio.num == 0) {
+      aspect_ratio = 0;
+    } else {
+      aspect_ratio = av_q2d(is->video_st->codec->sample_aspect_ratio) *
+	is->video_st->codec->width / is->video_st->codec->height;
+    }
+    if(aspect_ratio <= 0.0) {
+      aspect_ratio = (float)is->video_st->codec->width /
+	(float)is->video_st->codec->height;
+    }
+    h = screen->h;
+    w = ((int)rint(h * aspect_ratio)) & -3;
+    if(w > screen->w) {
+      w = screen->w;
+      h = ((int)rint(w / aspect_ratio)) & -3;
+    }
+    x = (screen->w - w) / 2;
+    y = (screen->h - h) / 2;
+    
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
+    SDL_LockMutex(screen_mutex);
+    SDL_DisplayYUVOverlay(vp->bmp, &rect);
+    SDL_UnlockMutex(screen_mutex);
+  }
+}
+```
+因为屏幕的大小可以是任意值（我们设置了640x480但是用户可以自行改变它），我们需要动态的弄清楚我们需要电影展示在多大的矩形中。所以我们需要找出电影的宽高比。有些编解码器有一个奇怪的采样宽高比，它是一个像素或者采样的宽高比。因为编解码器的宽高值是用像素衡量的，真实的宽高比等于宽高比乘以采样宽高比。有些编解码器的宽高比是0，这表明每个像素的大小都是1x1。接下来我们将电影缩放到屏幕大小。& -3位操作符将数值变为最近的4的倍数。接着我们可以进入电影，调用SDL_DisplayYUVOverlay()以便我们可以使用屏幕的锁去获取到overlay。
+
+这就完了吗？当然，我们还需要重写音频的代码来使用VideoStruct，不过这都很简单，读者可以自己看一下代码。最后一件我们要做的事是将ffmpeg内置的quit的回调函数换成我们自己的：
+```c
+VideoState *global_video_state;
+
+int decode_interrupt_cb(void) {
+  return (global_video_state && global_video_state->quit);
+}
+```
+我们在main函数里将global_video_state设置给大结构体。
+
+## 同步视频
+
+### 警告
+在写本文的时候，所有的同步代码都来自ffplay.c。如今ffplay.c完全是另一个程序了，ffmpeg里面的一些改进是的某些策略发生了变化。现在的代码还能用，但是看起来不够好，还可以有很多改进。
+
+### 视频怎么同步
+
+直到现在，我们的播放器都没什么用，它播放音视频，但是播放的结果不能称之为一部电影。我们应该做点什么？
+
+### PTS和DTS
+幸运的是，音视频流都有播放速度的信息，其内部也有何时播放的信息。音频流有一个采样频率，视频流有一个帧率。然而如果我们仅仅根据数帧数乘以帧率来同步，我们可能无法与音频同步。因此，在packet中可能包含了解码时间戳（DTS）和一个展示时间戳（PTS）。为了理解这两个值，我们需要知道电影是怎么存储的。有些格式，比如MPEG，使用我们称之为B帧（B代表双向）。另外两种帧被称为I帧和P帧（I代表内部的，P代表预测）。I帧包含一副完成的图片，P帧基于之前的I帧和P帧，对比相同和差异。B帧与P帧相似，但是它基于它前后两个方向帧的信息。所以我们在调用了avcodec_decode_video2之后可能还是拿不到一个完整的帧。
+
+假设我们有一个电影，它的帧序列是：I B B P。现在，我们需要知道P帧里面的信息以便展示两个B帧。因此，帧可能被存成：I P B B格式。所以我们有一个解码的时间戳和一个展示的时间戳。解码的时间戳告诉我们什么时候我们需要解码，展示的时间戳告诉我们什么时候我们需要展示。在这种情况下，我们的流看起来是这样的：
+```
+   PTS: 1 4 2 3
+   DTS: 1 2 3 4
+Stream: I P B B
+```
+总的来说，PTS和DTS只有在流里包含B帧的时候不同。
+
+当我们从av_read_frame()获取到一个packet时，它包含了这个packet里面的PTS和DTS的值。但是我们需要的是我们解码出来的帧的PTS，以便知道什么时候播放它。
+
+幸运的是，FFmpeg提供了一个best effort时间戳，我们可以通过av_frame_get_best_effort_timestamp()获取。
+
+### 同步
+
+现在，我们知道了什么时候展示特定的视频帧，然后我们该怎么做呢？现在的想法是：在展示完一个帧之后，我们看一下下一个帧应该什么时候展示。然后设置一个新的timeout来在一段时间之后刷新视频。可以想到，我们可以通过检查下一帧的PTS并与系统时钟对比去看timeout设置多大比较合适。这个方法可行，但是有两个问题需要处理。
+
+第一个问题是如何知道下一个PTS的值。我们可以将视频的帧率加上当前的PTS，这样做几乎是对的了。但是有些视频会要求当前帧重复几次。这意味着我们应该将当前帧重复播放几次。这会导致程序太早的播放下一个帧，我们需要处理这个问题。
+
+第二个问题是视频和音频持续的播放，相互之间同步没有处理。如果一切正常的话，我们不需要担心。但是电脑并不完美，很多电影文件也不完美。我们有三个选择：将音频与视频同步，将视频与音频同步，将两者与一个外部的时间（比如电脑）同步。目前我们将视频同步到音频。
+
+### 获取帧的PTS
+
+现在我们开始看完成这个功能的代码。我们需要根据我们的需求向我们的大结构体里面添加几个成员变量。首先我们看一下我们的视频线程。记住，展示我们获取解码线程放到队列里面的packet。这段代码需要做的是获取通过avcodec_decode_video2得到的帧的PTS值。我们之前讨论过的获取最新的处理过的packet的DTS值的第一种方法比较简单：
+```c
+  double pts;
+
+  for(;;) {
+    if(packet_queue_get(&is->videoq, packet, 1) < 0) {
+      // means we quit getting packets
+      break;
+    }
+    pts = 0;
+    // Decode video frame
+    len1 = avcodec_decode_video2(is->video_st->codec,
+                                pFrame, &frameFinished, packet);
+    if(packet->dts != AV_NOPTS_VALUE) {
+      pts = av_frame_get_best_effort_timestamp(pFrame);
+    } else {
+      pts = 0;
+    }
+    pts *= av_q2d(is->video_st->time_base);
+```
+如果获取不到PTS我们将其设置为0。
+
+一切都挺简单的，一个技术细节需要注意：我们应该注意到PTS的数值是int64。因为PTS被存储成一个integer。这个值是一个相对于流的时间基准（time_base）的时间戳。例如，一个流每秒钟24帧，PTS是42意味着1/24秒播放一帧的话这个是第42个帧。
+
+我们可以将这个值除以帧率转为秒，流的时间基准的值是1/帧率（对于固定帧率的内容而言），所以想得到以秒计算的PTS，将其乘以时间基准即可。
+
+### 使用PTS同步
+
+我们现在得到了PTS，现在我们需要处理上述的同步问题。我们定义一个函数synchronize_video来更新PTS使其与其它的东西同步。这个函数也会处理我们获取不到PTS的情况。与此同时，我们跟踪下一帧将要出现的时间以便能正确的设置刷新率。我们可以通过使用一个内部的video_clock值来保存跟踪视频来看已经过去了多长时间。我们将这个值加到我们的大结构体
+```c
+typedef struct VideoState {
+  double          video_clock; // pts of last decoded frame / predicted pts of next decoded frame
+```
+下面是synchronize_video函数，很容易看懂：
+```c
+double synchronize_video(VideoState *is, AVFrame *src_frame, double pts) {
+
+  double frame_delay;
+
+  if(pts != 0) {
+    /* if we have pts, set video clock to it */
+    is->video_clock = pts;
+  } else {
+    /* if we aren't given a pts, set it to the clock */
+    pts = is->video_clock;
+  }
+  /* update the video clock */
+  frame_delay = av_q2d(is->video_st->codec->time_base);
+  /* if we are repeating a frame, adjust clock accordingly */
+  frame_delay += src_frame->repeat_pict * (frame_delay * 0.5);
+  is->video_clock += frame_delay;
+  return pts;
+}
+```
+
+
