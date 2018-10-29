@@ -1262,5 +1262,506 @@ double synchronize_video(VideoState *is, AVFrame *src_frame, double pts) {
   return pts;
 }
 ```
+需要注意这里我们处理了重复播放的帧。
+
+现在我们获取到了正确的PTS并使用queue_picture函数建立了帧的队列，增加一个新的pts参数
+```cpp
+    // Did we get a video frame?
+    if(frameFinished) {
+      pts = synchronize_video(is, pFrame, pts);
+      if(queue_picture(is, pFrame, pts) < 0) {
+	      break;
+      }
+    }
+```
+
+我们需要对queue_picture函数进行修改，向添加进队列的VideoPicture增加pts值。所以我们向这个结构增加一个pts变量并增加一行代码
+```cpp
+typedef struct VideoPicture {
+  ...
+  double pts;
+}
+int queue_picture(VideoState *is, AVFrame *pFrame, double pts) {
+  ... stuff ...
+  if(vp->bmp) {
+    ... convert picture ...
+    vp->pts = pts;
+    ... alert queue ...
+  }
+```
+现在我们有了拥有正确的PTS数值的图片队列，接下来我们来改一下视频的刷新函数。之前的时候我们写的80ms刷新一次。现在我们来看看怎么处理。
+
+我们的策略是通过测量上一个pts和这个来预测下一个pts的值。与此同时，我们需要将视频同步到音频，我们需要一个音频时钟：一个内部的值泳衣跟踪我们当前音乐播放的位置。它像MP3播放器的数字读数，因为我们是将视频同步到音频，视频的线程使用该值来确定我们是太靠前还是太靠后了。
+
+我们后续再实现这一函数，现在我们假设get_audio_clock会提供给我们音频时钟的时间值。一旦我们有了这个值，当音视频不同步的时候我们该怎么做？通过seeking直接跳转到正确的packet不够合理。我们应该根据它调整我们计算出来的下一个刷新的时间间隔：如果PTS太落后于音频时钟，我们仅仅需要尽可能快的刷新，如果PTS太领先于音频时钟，我们将计算出来的延时乘以2。现在我们有了一个调整过的刷新时间，也即延时，我们需要把frame的计时器和计算机的时钟进行对比。这个frame的计时器将会把我们在播放电影的过程中计算出来的所有的延时求和。换句话说，frame_timer是展示下一个帧的时间，我们将新计算出来的延时加到上面，与计算机的时钟进行对比，然后使用比较的结果对下一个刷新进行规划。这个有点复杂，具体的代码实现如下
+```cpp
+void video_refresh_timer(void *userdata) {
+
+  VideoState *is = (VideoState *)userdata;
+  VideoPicture *vp;
+  double actual_delay, delay, sync_threshold, ref_clock, diff;
+  
+  if(is->video_st) {
+    if(is->pictq_size == 0) {
+      schedule_refresh(is, 1);
+    } else {
+      vp = &is->pictq[is->pictq_rindex];
+
+      delay = vp->pts - is->frame_last_pts; /* the pts from last time */
+      if(delay <= 0 || delay >= 1.0) {
+	/* if incorrect delay, use previous one */
+	delay = is->frame_last_delay;
+      }
+      /* save for next time */
+      is->frame_last_delay = delay;
+      is->frame_last_pts = vp->pts;
+
+      /* update delay to sync to audio */
+      ref_clock = get_audio_clock(is);
+      diff = vp->pts - ref_clock;
+
+      /* Skip or repeat the frame. Take delay into account
+	 FFPlay still doesn't "know if this is the best guess." */
+      sync_threshold = (delay > AV_SYNC_THRESHOLD) ? delay : AV_SYNC_THRESHOLD;
+      if(fabs(diff) < AV_NOSYNC_THRESHOLD) {
+	if(diff <= -sync_threshold) {
+	  delay = 0;
+	} else if(diff >= sync_threshold) {
+	  delay = 2 * delay;
+	}
+      }
+      is->frame_timer += delay;
+      /* computer the REAL delay */
+      actual_delay = is->frame_timer - (av_gettime() / 1000000.0);
+      if(actual_delay < 0.010) {
+	/* Really it should skip the picture instead */
+	actual_delay = 0.010;
+      }
+      schedule_refresh(is, (int)(actual_delay * 1000 + 0.5));
+      /* show the picture! */
+      video_display(is);
+      
+      /* update queue for next picture! */
+      if(++is->pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE) {
+	is->pictq_rindex = 0;
+      }
+      SDL_LockMutex(is->pictq_mutex);
+      is->pictq_size--;
+      SDL_CondSignal(is->pictq_cond);
+      SDL_UnlockMutex(is->pictq_mutex);
+    }
+  } else {
+    schedule_refresh(is, 100);
+  }
+}
+```
+代码里做了一些检查：首先，我们确保当前的PTS与上一个PTS之间的延时有意义，如果没有的话我们使用上一个延时来替代。接下来，我们设定了一个同步的阈值，因为完美的同步永远都不可能发生，ffplay使用0.01作为阈值。我们需要确保同步的阈值不小于PTS之间的差值。最后，我们将最小的刷新时间设定为10ms（这时我们应该跳过这个帧的，不过我们就不处理了）。
+
+我们向大结构体里面加入了很多个变量，记得看看代码回复一下。另外，我们需要在stream_component_open函数中初始化frame的计时器和上一帧的延时：
+```cpp
+    is->frame_timer = (double)av_gettime() / 1000000.0;
+    is->frame_last_delay = 40e-3;
+```
+
+### 同步：音频时钟
+
+我们接下来实现音频时钟，我们可以在解码音频的audio_decode_frame函数中更新音频时钟。我们并不是每次调用这个函数的时候都处理一个新的packet，所以我们有两个地方需要更新这个值。第一个地方时我们拿到一个新的packet的时候：我们将音频时钟设置为这个packet的PTS。如果一个packet包含多个音频帧，我们将时间更新为采样数乘以给定的采样率。所以一旦我们有了packet：
+```cpp
+    /* if update, update the audio clock w/pts */
+    if(pkt->pts != AV_NOPTS_VALUE) {
+      is->audio_clock = av_q2d(is->audio_st->time_base)*pkt->pts;
+    }
+```
+
+之后在我们处理packet的时候：
+```cpp
+      /* Keep audio_clock up-to-date */
+      pts = is->audio_clock;
+      *pts_ptr = pts;
+      n = 2 * is->audio_st->codec->channels;
+      is->audio_clock += (double)data_size /
+	(double)(n * is->audio_st->codec->sample_rate);
+```
+
+有一系列的细节需要注意：这个函数的模板改为包含pts_ptr，pts_ptr是一个用来告知音频audio_callback函数音频packet的pts。这个值未来会被用来将音频同步到视频。
+
+现在我们来实现get_audio_clock函数，它并不是简单的获取is->audio_clock的值。虽然我们每次处理音频的时候都将其为设置音频的PTS，但是如果看一下audio_callback函数，将数据从音频的packet移动到输出的buffer需要时间。这就意味着我们音频时钟的值太超前了。所以我么你需要检查我们还有多少没有写入，完整的代码如下：
+```cpp
+double get_audio_clock(VideoState *is) {
+  double pts;
+  int hw_buf_size, bytes_per_sec, n;
+  
+  pts = is->audio_clock; /* maintained in the audio thread */
+  hw_buf_size = is->audio_buf_size - is->audio_buf_index;
+  bytes_per_sec = 0;
+  n = is->audio_st->codec->channels * 2;
+  if(is->audio_st) {
+    bytes_per_sec = is->audio_st->codec->sample_rate * n;
+  }
+  if(bytes_per_sec) {
+    pts -= (double)hw_buf_size / bytes_per_sec;
+  }
+  return pts;
+}
+```
+代码的含义应该很容易看懂。
+
+## 同步音频
+
+现在我们有一个实现的相当好的播放器了，但是还有些地方处理的不好。上一章我们将视频同步到了音频。接下来我们对视频也增加一个内部的视频时钟来记录视频线程处理道德位置，并且与音频同步。再接着我们将音视频时钟同步到一个外部的时钟。
+
+### 实现视频时钟
+
+我们将实现一个与音频时钟很相似的视频时钟：带有一个内部的值来确定当前在播放的视频的时间偏移量。起初，这个看起来很简单，我们只需要将计时器的值更新为最新的帧的PTS。但是考虑到在毫秒尺度上，两个视频帧的时间间隔可能非常长。解决方案是记录另一个值，我们设定视频时钟为最新的帧的PTS时的时间。这样以来当前的视频时钟的值为PTS_of_last_frame + (current_time - time_elapsed_since_PTS_value_was_set)。这个解决方案跟我们处理get_audio_clock的方案非常类似。
+
+所以，在我们的大结构体里，我们将放入double video_current_pts和int64_t video_current_pts_time。时钟在video_refresh_timer函数中更新：
+```cpp
+void video_refresh_timer(void *userdata) {
+
+  /* ... */
+
+  if(is->video_st) {
+    if(is->pictq_size == 0) {
+      schedule_refresh(is, 1);
+    } else {
+      vp = &is->pictq[is->pictq_rindex];
+
+      is->video_current_pts = vp->pts;
+      is->video_current_pts_time = av_gettime();
+```
+
+不要忘掉在stream_component_open中完成初始化：
+```cpp
+    is->video_current_pts_time = av_gettime();
+```
+
+接下来我们完成提供信息的函数即可：
+```cpp
+double get_video_clock(VideoState *is) {
+  double delta;
+
+  delta = (av_gettime() - is->video_current_pts_time) / 1000000.0;
+  return is->video_current_pts + delta;
+}
+```
 
 
+### 抽象时钟
+
+但是我们为什么要用视频时钟呢？我们需要修改视频同步的代码，使得音频和视频不再相互同步。我们需要抽象出一个新的包装函数get_master_clock，它检查av_sync_type变量，然后调用get_audio_clock、get_video_clock，或者任何我们提供的其它时钟。我们还可以使用计算机的时钟，此时我们会调用get_external_clock：
+```cpp
+enum {
+  AV_SYNC_AUDIO_MASTER,
+  AV_SYNC_VIDEO_MASTER,
+  AV_SYNC_EXTERNAL_MASTER,
+};
+
+#define DEFAULT_AV_SYNC_TYPE AV_SYNC_VIDEO_MASTER
+
+double get_master_clock(VideoState *is) {
+  if(is->av_sync_type == AV_SYNC_VIDEO_MASTER) {
+    return get_video_clock(is);
+  } else if(is->av_sync_type == AV_SYNC_AUDIO_MASTER) {
+    return get_audio_clock(is);
+  } else {
+    return get_external_clock(is);
+  }
+}
+main() {
+...
+  is->av_sync_type = DEFAULT_AV_SYNC_TYPE;
+...
+}
+```
+
+
+### 同步音频
+
+接下来我们将音频同步到视频时钟。我们的策略是，确定音频播放到哪了，将它与视频时钟对比，确定我们需要调整多少采样，即，我们需要通过扔掉一些采样加速还是增加一些采样来降速？
+
+我们将会处理魅族音频采样的时候运行synchronize_audio，来确定是否需要缩减或者展开它们。然而，我们并不像每次处理音频的时候都进行同步，因为音频比视频的packet要频繁的多。所以我们需要设定阈值，当连续多次不同步之后才去调用synchronize_audio函数。当然，跟之前的时候一样，不同步意味着音频时钟和视频时钟的差异大于某一个同步的阈值。
+
+所以我们需要一个小数的系数c。我们假设我们有N个音频采样已经不同步了。不同步的音频数可能变化的很快。所以我们需要求不同步的音频采样数的平均值。举个例子，第一次调用函数的时候不同步的可能有40ms，接着是50ms，等等。但是我们并不是简单的取平均值，因为最近的数值比前面的数值更重要。我已我们使用一个小数的系数c，计算差异：diff_sum = new_diff + diff_sum*c。在我们求差异的平均值时，我们只需要计算avg_diff = diff_sum * (1-c)。
+
+我们的函数看起来如下
+```cpp
+/* Add or subtract samples to get a better sync, return new
+   audio buffer size */
+int synchronize_audio(VideoState *is, short *samples,
+		      int samples_size, double pts) {
+  int n;
+  double ref_clock;
+  
+  n = 2 * is->audio_st->codec->channels;
+  
+  if(is->av_sync_type != AV_SYNC_AUDIO_MASTER) {
+    double diff, avg_diff;
+    int wanted_size, min_size, max_size, nb_samples;
+    
+    ref_clock = get_master_clock(is);
+    diff = get_audio_clock(is) - ref_clock;
+
+    if(diff < AV_NOSYNC_THRESHOLD) {
+      // accumulate the diffs
+      is->audio_diff_cum = diff + is->audio_diff_avg_coef
+	* is->audio_diff_cum;
+      if(is->audio_diff_avg_count < AUDIO_DIFF_AVG_NB) {
+	is->audio_diff_avg_count++;
+      } else {
+	avg_diff = is->audio_diff_cum * (1.0 - is->audio_diff_avg_coef);
+
+       /* Shrinking/expanding buffer code.... */
+
+      }
+    } else {
+      /* difference is TOO big; reset diff stuff */
+      is->audio_diff_avg_count = 0;
+      is->audio_diff_cum = 0;
+    }
+  }
+  return samples_size;
+}
+```
+
+目前为止我们做的不错，我们知道了音频距离视频或者我们用的任何时钟大约多远。接下来我们这段“缩短或者展长缓存”的代码来计算我们需要增加或者删掉多少采样：
+```cpp
+if(fabs(avg_diff) >= is->audio_diff_threshold) {
+  wanted_size = samples_size + 
+  ((int)(diff * is->audio_st->codec->sample_rate) * n);
+  min_size = samples_size * ((100 - SAMPLE_CORRECTION_PERCENT_MAX)
+                             / 100);
+  max_size = samples_size * ((100 + SAMPLE_CORRECTION_PERCENT_MAX) 
+                             / 100);
+  if(wanted_size < min_size) {
+    wanted_size = min_size;
+  } else if (wanted_size > max_size) {
+    wanted_size = max_size;
+  }
+```
+
+记得audio_length * (sample_rate * # of channels * 2)是audio_length秒长的音频的采样数。所以，我们需要的样本数是是我们已经有的样本数加上或者减去已经播放过的音频的时间对应的音频数。我们还会设置一个最大或者最小的旧证书，以免我们一次改变了太多的buffer内容，用户听起来会比较刺耳。
+
+### 纠正样本数
+
+现在我们开始真正的音频纠正。应该已经注意到我们的synchronize_audio函数返回了一个采样数量，这会告诉我们我们往流里发送多少数据。所以我们只需要将采样数量调整为wanted_size。在将采样数量减小的情况下是没有问题的。但是如果我们想增大采样数量则不行，因为buffer中没有更多的数据。我们需要添加它，但是该添加哪些呢？填进去随机的数据显然很傻，我们使用最近的一个采样的数值进行填充。
+``cpp
+if(wanted_size < samples_size) {
+  /* remove samples */
+  samples_size = wanted_size;
+} else if(wanted_size > samples_size) {
+  uint8_t *samples_end, *q;
+  int nb;
+
+  /* add samples by copying final samples */
+  nb = (samples_size - wanted_size);
+  samples_end = (uint8_t *)samples + samples_size - n;
+  q = samples_end + n;
+  while(nb > 0) {
+    memcpy(q, samples_end, n);
+    q += n;
+    nb -= n;
+  }
+  samples_size = wanted_size;
+}
+```
+
+先我们返回了样本数量，并完成了相应的功能。我们所需要做的是使用下面的函数：
+```cpp
+void audio_callback(void *userdata, Uint8 *stream, int len) {
+
+  VideoState *is = (VideoState *)userdata;
+  int len1, audio_size;
+  double pts;
+
+  while(len > 0) {
+    if(is->audio_buf_index >= is->audio_buf_size) {
+      /* We have already sent all our data; get more */
+      audio_size = audio_decode_frame(is, is->audio_buf, sizeof(is->audio_buf), &pts);
+      if(audio_size < 0) {
+	/* If error, output silence */
+	is->audio_buf_size = 1024;
+	memset(is->audio_buf, 0, is->audio_buf_size);
+      } else {
+	audio_size = synchronize_audio(is, (int16_t *)is->audio_buf,
+				       audio_size, pts);
+	is->audio_buf_size = audio_size;
+```
+我们所需要做的都在synchronize_audio中完成了。
+
+最后一件要做的事：增加一个if语句确保在视频的计时器是主计时器时，不需要同步视频。
+```cpp
+if(is->av_sync_type != AV_SYNC_VIDEO_MASTER) {
+  ref_clock = get_master_clock(is);
+  diff = vp->pts - ref_clock;
+
+  /* Skip or repeat the frame. Take delay into account
+     FFPlay still doesn't "know if this is the best guess." */
+  sync_threshold = (delay > AV_SYNC_THRESHOLD) ? delay :
+                    AV_SYNC_THRESHOLD;
+  if(fabs(diff) < AV_NOSYNC_THRESHOLD) {
+    if(diff <= -sync_threshold) {
+      delay = 0;
+    } else if(diff >= sync_threshold) {
+      delay = 2 * delay;
+    }
+  }
+}
+```
+
+## 跳转
+
+### 处理跳转函数
+
+接下来我们往播放器里添加一些寻址的能力，因为看电影的时候不能回退用起来很不好。另外，添加这一功能可以展示一下av_seek_frame用起来很简单。
+
+我们将增加一个向左的和一个向右的箭头代表往后或者往前一点，一个向上的和向下的箭头代表向后或者向前一段，此处一点代表10秒，一段代表60秒。我们需要设置主线程去捕获键盘事件。然而，当我们获得键盘事件后，我们不能直接调用av_seek_frame。我们需要在解码的线程decode_thread中调用。因此，我们向我们的大结构体里面增加一些变量来记录需要跳转的地址和一些跳转的标志：
+```cpp
+  int             seek_req;
+  int             seek_flags;
+  int64_t         seek_pos;
+```
+
+接下来我们在主线程中捕获键盘输入：
+```cpp
+  for(;;) {
+    double incr, pos;
+
+    SDL_WaitEvent(&event);
+    switch(event.type) {
+    case SDL_KEYDOWN:
+      switch(event.key.keysym.sym) {
+      case SDLK_LEFT:
+	incr = -10.0;
+	goto do_seek;
+      case SDLK_RIGHT:
+	incr = 10.0;
+	goto do_seek;
+      case SDLK_UP:
+	incr = 60.0;
+	goto do_seek;
+      case SDLK_DOWN:
+	incr = -60.0;
+	goto do_seek;
+      do_seek:
+	if(global_video_state) {
+	  pos = get_master_clock(global_video_state);
+	  pos += incr;
+	  stream_seek(global_video_state, 
+                      (int64_t)(pos * AV_TIME_BASE), incr);
+	}
+	break;
+      default:
+	break;
+      }
+      break;
+```
+
+为了监控键盘输入，我们首先查看是否获取到一个SDL_KEYDOWN事件。然后我们使用event.key.keysym.sym函数检查哪个键被按下。一旦我们知道了如何跳转，我们将要增加的量加上get_master_clock函数的返回值作为新的事件。然后我们调用stream_seek去设置seek_pos等值。我们将新的事件转为avcodec内部的时间戳格式。记住流中的时间戳是以帧而不是秒衡量的，使用公式seconds = frames * time_base (fps)，avcodec中time_base的默认值是1,000,000 fps（所以两秒对应的时间戳是2000000）。
+
+我们的stream_seek函数如下，注意如果后退的话我们设置一个标识：
+```cpp
+void stream_seek(VideoState *is, int64_t pos, int rel) {
+
+  if(!is->seek_req) {
+    is->seek_pos = pos;
+    is->seek_flags = rel < 0 ? AVSEEK_FLAG_BACKWARD : 0;
+    is->seek_req = 1;
+  }
+}
+```
+
+接下来我们修改decode_thread，它真正的处理跳转。源代码中跳转的部分在下面会引用。跳转主要依赖av_seek_frame函数。这个函数接收一个格式的上下文，一个流，一个时间戳和一系列的标识作为参数。函数将会跳转到传入的时间戳。时间戳的单位是传入给它的流的time_base。如果我们没有传入流（传入-1代表没有传入流），time_base将会取avcodec内部的时间戳单位，或者1,000,000 fps。所以上面我们将位置乘以AV_TIME_BASE作为seek_pos的参数。
+
+然而，对于有些文件，传入-1给av_seek_frame可能会有问题，所以我们将文件的第一个流传入给av_seek_frame。注意到我们需要将时间戳转换一下单位。
+```cpp
+if(is->seek_req) {
+  int stream_index= -1;
+  int64_t seek_target = is->seek_pos;
+
+  if     (is->videoStream >= 0) stream_index = is->videoStream;
+  else if(is->audioStream >= 0) stream_index = is->audioStream;
+
+  if(stream_index>=0){
+    seek_target= av_rescale_q(seek_target, AV_TIME_BASE_Q,
+                      pFormatCtx->streams[stream_index]->time_base);
+  }
+  if(av_seek_frame(is->pFormatCtx, stream_index, 
+                    seek_target, is->seek_flags) < 0) {
+    fprintf(stderr, "%s: error while seeking\n",
+            is->pFormatCtx->filename);
+  } else {
+     /* handle packet queues... more later... */
+
+```
+av_rescale_q(a,b,c)是一个时间戳单位转换的函数，它的主要功能是计算a*b/c但是它处理了溢出之类的问题。AV_TIME_BASE_Q是AV_TIME_BASE的小数形式，AV_TIME_BASE * time_in_seconds = avcodec_timestamp而 AV_TIME_BASE_Q * avcodec_timestamp = time_in_seconds（需要注意AV_TIME_BASE_Q是一个AVRational对象，所以我们使用了avcodec的一个后缀是q的functions来处理）。
+
+### 清空buffer
+现在我们设置了跳转，但是并没有结束。我们之前设置了一个队列存储packet。现在我们跳转到了另一个地方，所以我们需要清空队列要不然电影不会跳转。不止如此，avcodec有它自己的缓存，所以每个线程都需要清空它。
+
+为此，我们需要编写函数来清理packet的队列，然后我们需要使用某种机制通知音频和视频的线程，让它们清空avcodec的内部缓存。我们可以通过在清空队列后，向其中放一个特殊的packet来完成。在它们检测到特殊的包的时候，它们清空自己的缓存。
+
+负责清空的函数代码如下：
+```cpp
+static void packet_queue_flush(PacketQueue *q) {
+  AVPacketList *pkt, *pkt1;
+
+  SDL_LockMutex(q->mutex);
+  for(pkt = q->first_pkt; pkt != NULL; pkt = pkt1) {
+    pkt1 = pkt->next;
+    av_free_packet(&pkt->pkt);
+    av_freep(&pkt);
+  }
+  q->last_pkt = NULL;
+  q->first_pkt = NULL;
+  q->nb_packets = 0;
+  q->size = 0;
+  SDL_UnlockMutex(q->mutex);
+}
+```
+
+现在队列被清空了，我们放置一个“清空包”，不过首先我们需要定义它：
+```cpp
+AVPacket flush_pkt;
+
+main() {
+  ...
+  av_init_packet(&flush_pkt);
+  flush_pkt.data = "FLUSH";
+  ...
+}
+```
+然后将其放入队列
+```cpp
+  } else {
+    if(is->audioStream >= 0) {
+      packet_queue_flush(&is->audioq);
+      packet_queue_put(&is->audioq, &flush_pkt);
+    }
+    if(is->videoStream >= 0) {
+      packet_queue_flush(&is->videoq);
+      packet_queue_put(&is->videoq, &flush_pkt);
+    }
+  }
+  is->seek_req = 0;
+}
+```
+我们还需要更改packet_queue_put函数来避免重复放入这个特殊的packet：
+```cpp
+int packet_queue_put(PacketQueue *q, AVPacket *pkt) {
+
+  AVPacketList *pkt1;
+  if(pkt != &flush_pkt && av_dup_packet(pkt) < 0) {
+    return -1;
+  }
+```
+然后在音视频的解码线程中，我们在packet_queue_get之后增加avcodec_flush_buffers：
+```cpp
+    if(packet_queue_get(&is->audioq, pkt, 1) < 0) {
+      return -1;
+    }
+    if(pkt->data == flush_pkt.data) {
+      avcodec_flush_buffers(is->audio_st->codec);
+      continue;
+    }
+```
+在视频线程中，代码也是一样的，只是audio换成video。
